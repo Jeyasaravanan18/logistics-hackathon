@@ -1,0 +1,107 @@
+version: "3.9"
+
+services:
+  # ── PostgreSQL Database
+  db:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_DB: logistics
+      POSTGRES_USER: logistics_user
+      POSTGRES_PASSWORD: logistics_pass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U logistics_user -d logistics"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis Cache / Message Broker
+  redis:
+    image: redis:7-alpine
+    restart: always
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── FastAPI Backend
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://logistics_user:logistics_pass@db:5432/logistics
+      REDIS_URL: redis://redis:6379/0
+      OPENWEATHER_API_KEY: ${OPENWEATHER_API_KEY}
+      GNEWS_API_KEY: ${GNEWS_API_KEY}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ── Celery Background Worker (runs AI agent pipeline)
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      DATABASE_URL: postgresql+asyncpg://logistics_user:logistics_pass@db:5432/logistics
+      REDIS_URL: redis://redis:6379/0
+      OPENWEATHER_API_KEY: ${OPENWEATHER_API_KEY}
+      GNEWS_API_KEY: ${GNEWS_API_KEY}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A celery_worker worker --loglevel=info --concurrency=2
+
+  # ── Celery Beat (triggers periodic jobs every 15 minutes)
+  celery_beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      DATABASE_URL: postgresql+asyncpg://logistics_user:logistics_pass@db:5432/logistics
+      REDIS_URL: redis://redis:6379/0
+      OPENWEATHER_API_KEY: ${OPENWEATHER_API_KEY}
+      GNEWS_API_KEY: ${GNEWS_API_KEY}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A celery_worker beat --loglevel=info
+
+  # ── Next.js Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_BACKEND_URL: http://api:8000
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
